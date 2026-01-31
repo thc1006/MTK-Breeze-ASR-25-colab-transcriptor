@@ -1,18 +1,18 @@
-# 🎙️ GPU Audio Enhancer
+# 台灣在地化的中文語音轉文字轉錄器
 
-利用 NVIDIA GPU 加速的音頻增強工具，專門用於放大小聲錄音並提升音質。
+MediaTek Breeze-ASR-25 + 時間戳記對齊 台灣本土中/英文語音轉文字轉錄器 Colab 實作
 
-## ✨ 功能特色
+> Google Colab 版本：https://colab.research.google.com/drive/1RgRKhBo9vBAQ3ZUqt4APBfsT-u1ECB18
 
-- ⚡ **GPU 加速** - 使用 CUDA 進行高速處理
-- 🔊 **智能響度正規化** - LUFS 標準化（支援串流平台標準）
-- 🎚️ **動態範圍壓縮** - 讓大小聲更均衡
-- 🔇 **AI 降噪** - 移除背景雜音
-- 📊 **頻譜增強 (EQ)** - 可調整低/中/高頻
-- 📁 **批次處理** - 一次處理整個資料夾
-- 🖥️ **CLI + GUI** - 命令行與圖形介面雙支援
+- **GPU 加速** - 使用 CUDA 進行高速處理
+- **智能響度正規化** - LUFS 標準化（支援串流平台標準）
+- **動態範圍壓縮** - 讓大小聲更均衡
+- **AI 降噪** - 移除背景雜音
+- **頻譜增強 (EQ)** - 可調整低/中/高頻
+- **批次處理** - 一次處理整個資料夾
+- **CLI + GUI** - 命令行與圖形介面雙支援
 
-## 🚀 安裝
+## 安裝
 
 ### 系統需求
 
@@ -58,7 +58,7 @@ brew install ffmpeg
 choco install ffmpeg
 ```
 
-## 📖 使用方式
+## 使用方式
 
 ### CLI 命令行
 
@@ -119,7 +119,7 @@ audio-enhance-gui
 python gui.py
 ```
 
-## ⚙️ 參數說明
+## 參數說明
 
 | 參數 | 說明 | 預設值 | 範圍 |
 |------|------|--------|------|
@@ -162,17 +162,7 @@ output:
   sample_rate: 44100
 ```
 
-## 📊 效能測試
-
-| GPU | 10分鐘音檔處理時間 |
-|-----|-------------------|
-| RTX 4090 | ~8 秒 |
-| RTX 3080 | ~15 秒 |
-| RTX 2070 | ~25 秒 |
-| GTX 1080 | ~35 秒 |
-| CPU (i7-12700) | ~120 秒 |
-
-## 🔧 進階用法
+## 進階用法
 
 ### 使用設定檔
 
@@ -192,13 +182,13 @@ docker run --gpus all -v $(pwd)/audio:/data audio-enhancer \
     /data/input.wav -o /data/output.wav
 ```
 
-## 📝 支援格式
+## 支援格式
 
 **輸入**: `.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.wma`
 
 **輸出**: `.wav`, `.mp3`, `.flac`
 
-## 🐛 常見問題
+## 常見問題
 
 ### CUDA 不可用
 
@@ -219,10 +209,10 @@ python -c "import torch; print(torch.cuda.is_available())"
 audio-enhance input.wav -o output.wav --chunk-mode
 ```
 
-## 📄 License
+## License
 
 MIT License
 
-## 🤝 Contributing
+## Contributing
 
 歡迎提交 Issue 和 Pull Request！
