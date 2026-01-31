@@ -1,0 +1,61 @@
+# Audio Enhancer Default Configuration
+# =====================================
+
+# 響度設定
+loudness:
+  # 目標響度 (LUFS)
+  # -14 = YouTube/Spotify 標準
+  # -16 = 廣播標準
+  # -23 = EBU R128 標準
+  target: -14.0
+  
+  # 峰值上限 (dB)，防止削波
+  peak_ceiling: -1.0
+
+# 動態範圍壓縮
+compression:
+  enabled: true
+  # 閾值 (dB)：超過此值的聲音會被壓縮
+  threshold: -20.0
+  # 壓縮比：4.0 表示超過閾值的部分會被壓縮到 1/4
+  ratio: 4.0
+  # 啟動時間 (ms)
+  attack: 5.0
+  # 釋放時間 (ms)
+  release: 50.0
+
+# 降噪
+denoise:
+  enabled: true
+  # 降噪強度 (0-1)
+  # 0.5-0.8 適合一般錄音
+  # 太高可能影響音質
+  strength: 0.75
+  # 是否使用靜態降噪（適合穩定背景噪音）
+  stationary: false
+
+# 頻譜增強 (EQ)
+eq:
+  enabled: true
+  # 低頻增益 (dB)：< 250 Hz
+  bass: 2.0
+  # 中頻增益 (dB)：250-4000 Hz（人聲主要範圍）
+  mid: 2.0
+  # 高頻增益 (dB)：> 4000 Hz
+  treble: 1.0
+
+# 輸出設定
+output:
+  # 輸出格式：wav, mp3, flac
+  format: wav
+  # 採樣率
+  sample_rate: 44100
+
+# 處理設定
+processing:
+  # 是否使用 GPU（自動偵測）
+  use_gpu: auto
+  # 分段處理（用於超長音檔）
+  chunk_mode: false
+  # 每段長度（秒）
+  chunk_size: 300
