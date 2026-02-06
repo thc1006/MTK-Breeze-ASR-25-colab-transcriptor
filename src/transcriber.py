@@ -202,7 +202,7 @@ class BreezeTranscriber:
         self,
         model_id: Optional[str] = None,
         device: str = "auto",
-        config: Optional[Union[RTX3050Config, QualityConfig]] = None,
+        config: Optional[Union[RTX3050Config, QualityConfig, GPUConfig]] = None,
         download_root: Optional[str] = None,
     ):
         """
@@ -211,7 +211,7 @@ class BreezeTranscriber:
         Args:
             model_id: 模型 ID，預設使用 Breeze-ASR-25
             device: 裝置 ("auto", "cuda", "cpu")
-            config: 優化配置，預設自動偵測硬體
+            config: 優化配置，預設自動偵測硬體 (None = 自動)
             download_root: 模型下載目錄
         """
         self.model_id = model_id or self.MODEL_ID
@@ -241,42 +241,54 @@ class BreezeTranscriber:
             return "cpu"
         return device
 
-    def _auto_config(self) -> RTX3050Config:
-        """根據硬體自動選擇最佳配置"""
-        if self.device == "cuda":
-            vram_mb = torch.cuda.get_device_properties(0).total_memory // (1024 * 1024)
-            gpu_name = torch.cuda.get_device_name(0)
-
-            print(f"[GPU] {gpu_name}")
-            print(f"[VRAM] {vram_mb} MB")
-
-            # 根據 VRAM 選擇配置
-            if vram_mb <= 4096:
-                print("[Profile] RTX 3050 4GB - 速度優化模式")
-                return RTX3050Config()
-            elif vram_mb <= 6144:
-                print("[Profile] 6GB VRAM - 平衡模式")
-                cfg = RTX3050Config()
-                cfg.beam_size = 3
-                return cfg
-            elif vram_mb <= 8192:
-                print("[Profile] 8GB VRAM - 品質模式")
-                cfg = RTX3050Config()
-                cfg.compute_type = "float16"
-                cfg.beam_size = 5
-                return cfg
-            else:
-                print("[Profile] 大 VRAM - 全速模式")
-                cfg = RTX3050Config()
-                cfg.compute_type = "float16"
-                cfg.beam_size = 5
-                cfg.condition_on_previous_text = True
-                return cfg
-        else:
+    def _auto_config(self) -> GPUConfig:
+        """根據 VRAM 和 compute capability 自動選擇最佳配置"""
+        if self.device != "cuda":
             print("[CPU] 使用 INT8 量化")
-            cfg = RTX3050Config()
-            cfg.compute_type = "int8"
-            return cfg
+            return GPUConfig(compute_type="int8", tier_name="cpu")
+
+        props = torch.cuda.get_device_properties(0)
+        vram_mb = props.total_memory // (1024 * 1024)
+        gpu_name = torch.cuda.get_device_name(0)
+        cc = props.major + props.minor / 10  # 例如 8.6, 8.9, 9.0
+
+        print(f"[GPU] {gpu_name}")
+        print(f"[VRAM] {vram_mb} MB")
+        print(f"[CC] {props.major}.{props.minor}")
+
+        # 查表：找到 VRAM 所屬的層級
+        matched = None
+        for tier in _VRAM_TIERS:
+            if vram_mb <= tier[1]:
+                matched = tier
+                break
+
+        # 超過所有層級就用 ultra
+        if matched is None:
+            matched = _ULTRA_TIER
+
+        tier_name, _, compute_type, beam, batch, cond_prev, workers = matched
+
+        # Ampere+ (CC >= 8.0) 且 high 以上層級：升級到 bfloat16
+        if cc >= 8.0 and compute_type == "float16" and tier_name in ("high", "very_high", "ultra"):
+            compute_type = "bfloat16"
+
+        cfg = GPUConfig(
+            compute_type=compute_type,
+            beam_size=beam,
+            batch_size=batch,
+            condition_on_previous_text=cond_prev,
+            num_workers=workers,
+            gpu_name=gpu_name,
+            vram_mb=vram_mb,
+            compute_capability=cc,
+            tier_name=tier_name,
+        )
+
+        batch_label = f", batch={batch}" if batch > 0 else ""
+        print(f"[Profile] {tier_name} - {compute_type}, beam={beam}{batch_label}")
+
+        return cfg
 
     def _setup_cuda_optimizations(self):
         """設定 CUDA 優化"""
@@ -439,13 +451,26 @@ class BreezeTranscriber:
 
     def get_config_summary(self) -> str:
         """取得配置摘要"""
-        return (
-            f"Device: {self.device}\n"
-            f"Compute: {self.config.compute_type}\n"
-            f"Beam: {self.config.beam_size}\n"
-            f"VAD: {self.config.vad_filter} (threshold={self.config.vad_threshold})\n"
-            f"Chunk: {self.config.chunk_length}s\n"
-        )
+        lines = [
+            f"Device: {self.device}",
+            f"Compute: {self.config.compute_type}",
+            f"Beam: {self.config.beam_size}",
+            f"VAD: {self.config.vad_filter} (threshold={self.config.vad_threshold})",
+            f"Chunk: {self.config.chunk_length}s",
+        ]
+
+        # GPUConfig 才有偵測資訊
+        tier = getattr(self.config, "tier_name", "")
+        if tier and tier != "unknown":
+            lines.insert(0, f"Tier: {tier}")
+        gpu = getattr(self.config, "gpu_name", "")
+        if gpu:
+            lines.insert(0, f"GPU: {gpu}")
+        batch = getattr(self.config, "batch_size", 0)
+        if batch > 0:
+            lines.append(f"Batch: {batch}")
+
+        return "\n".join(lines) + "\n"
 
 
 # ============================================================================
