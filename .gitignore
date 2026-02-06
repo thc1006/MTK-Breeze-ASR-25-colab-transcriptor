@@ -65,6 +65,7 @@ logs/
 
 # Config overrides
 config/local.yaml
+CLAUDE.md
 
 # Jupyter
 .ipynb_checkpoints/
