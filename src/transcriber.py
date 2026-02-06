@@ -232,6 +232,8 @@ class BreezeTranscriber:
 
         # 延遲載入模型
         self._model = None
+        self._batched_model = None
+        self._use_batched = False
 
     def _detect_device(self, device: str) -> str:
         """偵測最佳裝置"""
@@ -331,6 +333,18 @@ class BreezeTranscriber:
             num_workers=self.config.num_workers,
         )
 
+        # 嘗試建立批次推論管線（VRAM 夠大才有 batch_size > 0）
+        batch_size = getattr(self.config, "batch_size", 0)
+        if batch_size > 0:
+            try:
+                from faster_whisper import BatchedInferencePipeline
+                self._batched_model = BatchedInferencePipeline(model=self._model)
+                self._use_batched = True
+                print(f"[Batch] BatchedInferencePipeline enabled, batch_size={batch_size}")
+            except (ImportError, AttributeError):
+                # 舊版 faster-whisper 不支援，降級為一般模式
+                print("[Batch] BatchedInferencePipeline not available, fallback to normal mode")
+
         # 顯示 VRAM 使用量
         if self.device == "cuda":
             torch.cuda.synchronize()
@@ -376,9 +390,8 @@ class BreezeTranscriber:
                 "max_speech_duration_s": self.config.vad_max_speech_duration,
             }
 
-        # 執行轉錄（使用所有優化參數）
-        segments_raw, info = self.model.transcribe(
-            str(audio_path),
+        # 共用的轉錄參數
+        transcribe_kwargs = dict(
             language=language,
             task=task,
             beam_size=self.config.beam_size,
@@ -392,6 +405,21 @@ class BreezeTranscriber:
             initial_prompt=initial_prompt,
             without_timestamps=self.config.without_timestamps,
         )
+
+        # 批次模式 vs 一般模式
+        if self._use_batched and self._batched_model is not None:
+            batch_size = getattr(self.config, "batch_size", 16)
+            print(f"[Mode] Batched (batch_size={batch_size})")
+            segments_raw, info = self._batched_model.transcribe(
+                str(audio_path),
+                batch_size=batch_size,
+                **transcribe_kwargs,
+            )
+        else:
+            segments_raw, info = self.model.transcribe(
+                str(audio_path),
+                **transcribe_kwargs,
+            )
 
         # 轉換為 TranscriptSegment
         segments = []
