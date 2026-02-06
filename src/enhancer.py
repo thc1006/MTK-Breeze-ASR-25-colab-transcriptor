@@ -273,9 +273,76 @@ class AudioEnhancer:
         
         return normalized
     
+    def _get_meter(self, sr: int) -> pyln.Meter:
+        """取得對應取樣率的 loudness meter
+
+        pyloudnorm.Meter 綁定取樣率，不同取樣率需要不同的 Meter 實例。
+        self.meter 對應 config.sample_rate（通常 44100）；
+        若傳入的 sr 不同，就另外建一個。
+
+        Args:
+            sr: 取樣率
+
+        Returns:
+            對應取樣率的 Meter 實例
+        """
+        if sr == self.config.sample_rate:
+            return self.meter
+        return pyln.Meter(sr)
+
+    def process_array(
+        self,
+        audio: np.ndarray,
+        sr: int,
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
+        """直接處理 numpy array（不經過磁碟 I/O）
+
+        跟 process() 走一樣的增強流程（denoise -> compress -> EQ -> loudness），
+        但省掉讀寫檔案的步驟，適合當作 ASR 前處理。
+
+        Args:
+            audio: mono numpy array，任意取樣率
+            sr: 取樣率
+
+        Returns:
+            (enhanced_audio, stats)
+            stats 包含 original_loudness / final_loudness / gain
+        """
+        meter = self._get_meter(sr)
+        original_loudness = meter.integrated_loudness(audio)
+
+        # 增強流程
+        audio = self.denoise(audio, sr)
+        audio = self.compress(audio, sr)
+        audio = self.apply_eq(audio, sr)
+
+        # 響度標準化（用對應取樣率的 meter）
+        current_loudness = meter.integrated_loudness(audio)
+        if not np.isinf(current_loudness):
+            gain_db = self.config.target_loudness - current_loudness
+            gain_linear = 10 ** (gain_db / 20)
+            audio = audio * gain_linear
+            ceiling = 10 ** (self.config.peak_ceiling / 20)
+            audio = np.clip(audio, -ceiling, ceiling)
+        else:
+            # 太安靜，做 peak normalization
+            peak = np.max(np.abs(audio))
+            if peak > 0:
+                ceiling = 10 ** (self.config.peak_ceiling / 20)
+                audio = audio * (ceiling / peak)
+
+        final_loudness = meter.integrated_loudness(audio)
+
+        stats = {
+            "original_loudness": float(original_loudness),
+            "final_loudness": float(final_loudness),
+            "gain": float(final_loudness - original_loudness),
+        }
+        return audio, stats
+
     def process(
-        self, 
-        input_path: Union[str, Path], 
+        self,
+        input_path: Union[str, Path],
         output_path: Union[str, Path]
     ) -> Dict[str, float]:
         """Process a single audio file.
