@@ -1,218 +1,143 @@
-# 台灣在地化的中文語音轉文字轉錄器
+# 台灣在地化中文語音轉文字轉錄器
 
-MediaTek Breeze-ASR-25 + 時間戳記對齊 台灣本土中/英文語音轉文字轉錄器 Colab 實作
+使用 MediaTek Breeze-ASR-25 官方模型，支援時間戳記對齊，可在 RTX 3050 4GB 等低 VRAM 環境下執行。
 
-> Google Colab 版本：https://colab.research.google.com/drive/1RgRKhBo9vBAQ3ZUqt4APBfsT-u1ECB18
+## 功能
 
-- **GPU 加速** - 使用 CUDA 進行高速處理
-- **智能響度正規化** - LUFS 標準化（支援串流平台標準）
-- **動態範圍壓縮** - 讓大小聲更均衡
-- **AI 降噪** - 移除背景雜音
-- **頻譜增強 (EQ)** - 可調整低/中/高頻
-- **批次處理** - 一次處理整個資料夾
-- **CLI + GUI** - 命令行與圖形介面雙支援
+- 語音轉文字：使用 MediaTek-Research/Breeze-ASR-25 官方模型
+- 時間戳記：每段文字標註起始與結束時間
+- SRT 字幕：標準字幕格式輸出
+- 自適應 GPU 配置：自動偵測 VRAM 選擇最佳設定
+- 音頻增強：降噪、響度正規化
+
+## 系統需求
+
+- Python 3.10+
+- NVIDIA GPU (建議 4GB+ VRAM) 或 CPU
+- CUDA 12.x (GPU 模式)
 
 ## 安裝
 
-### 系統需求
-
-- Python 3.8+
-- NVIDIA GPU with CUDA support (建議 4GB+ VRAM)
-- FFmpeg
-
-### 安裝步驟
-
 ```bash
-# 1. Clone repo
-git clone https://github.com/yourusername/audio-enhancer-gpu.git
-cd audio-enhancer-gpu
+# 1. Clone
+git clone https://github.com/yourusername/MTK-Breeze-ASR-25-colab-transcriptor.git
+cd MTK-Breeze-ASR-25-colab-transcriptor
 
-# 2. 建立虛擬環境（建議）
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或 venv\Scripts\activate  # Windows
-
-# 3. 安裝 PyTorch (根據你的 CUDA 版本)
-# CUDA 12.1
+# 2. 安裝 PyTorch (CUDA 12.1)
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-# CUDA 11.8
-# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-# 4. 安裝其他依賴
+# 3. 安裝依賴
 pip install -r requirements.txt
-
-# 5. 安裝套件
-pip install -e .
 ```
 
-### 安裝 FFmpeg
-
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
-
-# Windows (使用 Chocolatey)
-choco install ffmpeg
-```
+首次執行會下載模型（約 3GB），之後會快取。
 
 ## 使用方式
 
-### CLI 命令行
+### 語音轉文字
 
 ```bash
-# 處理單一檔案
-audio-enhance input.wav -o output.wav
+# 自動偵測 GPU，選擇最佳配置
+python transcribe_cli.py audio.m4a --mode auto
 
-# 處理整個資料夾
-audio-enhance ./recordings/ -o ./enhanced/
+# 速度優先（NF4 量化 + beam=1，低 VRAM 適用）
+python transcribe_cli.py audio.m4a --mode speed
 
-# 自訂參數
-audio-enhance input.wav -o output.wav \
-    --loudness -14 \
-    --denoise 0.8 \
-    --compress \
-    --eq-mid 3.0
+# 品質優先（float16 + beam=3）
+python transcribe_cli.py audio.m4a --mode quality
 
-# 查看所有選項
-audio-enhance --help
+# 輸出 SRT 字幕
+python transcribe_cli.py audio.m4a --srt
+
+# 指定輸出路徑
+python transcribe_cli.py audio.m4a -o result.txt
+
+# 英文轉錄
+python transcribe_cli.py audio.mp3 --lang en
+
+# 強制 CPU
+python transcribe_cli.py audio.m4a --cpu
 ```
 
-### Python API
-
-```python
-from src.enhancer import AudioEnhancer
-from src.config import EnhanceConfig
-
-# 建立配置
-config = EnhanceConfig(
-    target_loudness=-14.0,
-    enable_denoise=True,
-    denoise_strength=0.75,
-    enable_compression=True,
-    enable_eq=True,
-    mid_boost=2.0
-)
-
-# 初始化增強器
-enhancer = AudioEnhancer(config)
-
-# 處理單一檔案
-stats = enhancer.process("input.wav", "output.wav")
-print(f"增益: {stats['gain']:.1f} dB")
-
-# 批次處理
-results = enhancer.process_batch(
-    input_dir="./recordings",
-    output_dir="./enhanced"
-)
-```
-
-### GUI 圖形介面
+### 音頻增強
 
 ```bash
-# 啟動 GUI
-audio-enhance-gui
-# 或
-python gui.py
+python cli.py input.wav -o output.wav
 ```
 
-## 參數說明
+## 輸出格式
 
-| 參數 | 說明 | 預設值 | 範圍 |
-|------|------|--------|------|
-| `--loudness` | 目標響度 (LUFS) | -14.0 | -30 ~ -5 |
-| `--denoise` | 降噪強度 | 0.75 | 0 ~ 1 |
-| `--compress` | 啟用動態壓縮 | True | - |
-| `--threshold` | 壓縮閾值 (dB) | -20 | -40 ~ -5 |
-| `--ratio` | 壓縮比 | 4.0 | 1 ~ 10 |
-| `--eq-bass` | 低頻增益 (dB) | 2.0 | -6 ~ 6 |
-| `--eq-mid` | 中頻增益 (dB) | 2.0 | -6 ~ 6 |
-| `--eq-treble` | 高頻增益 (dB) | 1.0 | -6 ~ 6 |
-| `--format` | 輸出格式 | wav | wav/mp3/flac |
-
-### 預設設定檔
-
-可以修改 `config/default.yaml` 來更改預設參數：
-
-```yaml
-loudness:
-  target: -14.0
-  peak_ceiling: -1.0
-
-compression:
-  enabled: true
-  threshold: -20.0
-  ratio: 4.0
-
-denoise:
-  enabled: true
-  strength: 0.75
-
-eq:
-  enabled: true
-  bass: 2.0
-  mid: 2.0
-  treble: 1.0
-
-output:
-  format: wav
-  sample_rate: 44100
+### TXT（時間戳記）
+```
+[00:00:01.25 - 00:00:07.25] 第一個是我們剛剛講到的那個無人機...
 ```
 
-## 進階用法
-
-### 使用設定檔
-
-```bash
-# 使用自訂設定檔
-audio-enhance input.wav -o output.wav --config my_config.yaml
+### SRT（字幕）
+```srt
+1
+00:00:01,250 --> 00:00:07,250
+第一個是我們剛剛講到的那個無人機...
 ```
 
-### Docker 使用
+## 效能參考（RTX 3050 Laptop 4GB）
 
-```bash
-# 建構 image
-docker build -t audio-enhancer .
+以下為 6 分鐘台灣華語音檔的實測數據，實際速度依硬體和音檔內容而異。
 
-# 執行（需要 NVIDIA Docker）
-docker run --gpus all -v $(pwd)/audio:/data audio-enhancer \
-    /data/input.wav -o /data/output.wav
+| 模式 | 量化 | 6 分鐘音檔耗時 |
+|------|------|----------------|
+| speed (beam=1) | NF4 4-bit | 約 4-5 分鐘 |
+| quality (beam=3) | float16 | 較慢 |
+| auto | 依 GPU 決定 | 依 GPU 決定 |
+
+VRAM 占用：NF4 量化約 930MB，可在 4GB GPU 上穩定執行。
+
+## 自適應 GPU 分級
+
+系統會自動偵測 GPU 的 VRAM 和 compute capability，從內建分級表選擇配置：
+
+| 分級 | VRAM | 量化 | beam |
+|------|------|------|------|
+| low | 4GB 以下 | NF4 4-bit | 1 |
+| mid_low | 5-6GB | INT8 | 2 |
+| mid | 7-8GB | 無 | 3 |
+| mid_high+ | 9GB 以上 | 無 | 5 |
+
+量化載入失敗時會自動降級：NF4 -> INT8 -> float16 -> CPU。
+
+## 專案結構
+
+```
+.
+├── transcribe_cli.py  # 語音轉文字 CLI
+├── cli.py             # 音頻增強 CLI
+├── gui.py             # 音頻增強 GUI
+├── src/
+│   ├── transcriber.py # Breeze-ASR-25 轉錄器（HF Transformers + Silero-VAD）
+│   ├── enhancer.py    # 音頻增強器
+│   └── config.py      # 音頻增強配置
+└── config/
+    └── default.yaml   # 音頻增強預設配置
 ```
 
-## 支援格式
+## 技術細節
 
-**輸入**: `.wav`, `.mp3`, `.flac`, `.m4a`, `.ogg`, `.aac`, `.wma`
+- 模型：MediaTek-Research/Breeze-ASR-25（官方 HuggingFace 權重）
+- 後端：HuggingFace Transformers pipeline
+- VAD：Silero-VAD（語音區段偵測，跳過靜音段）
+- 量化：bitsandbytes NF4/INT8（低 VRAM GPU 用）
+- 支援格式：.wav, .mp3, .m4a, .flac, .ogg, .aac
 
-**輸出**: `.wav`, `.mp3`, `.flac`
+## 注意事項
 
-## 常見問題
+- Windows 終端機可能顯示亂碼（cp950 編碼），輸出檔案是正確的 UTF-8
+- bitsandbytes 在部分 Windows 環境可能不支援，會自動降級為 float16
+- 長音檔（超過 30 分鐘）建議使用 speed 模式
 
-### CUDA 不可用
+## Colab 版本
 
-```bash
-# 檢查 CUDA 是否可用
-python -c "import torch; print(torch.cuda.is_available())"
-```
-
-如果返回 `False`，請確認：
-1. 已安裝 NVIDIA 驅動
-2. PyTorch 版本與 CUDA 版本匹配
-
-### 記憶體不足
-
-處理超長音檔時可能出現 OOM，可以：
-```bash
-# 使用分段處理模式
-audio-enhance input.wav -o output.wav --chunk-mode
-```
+沒有本地 GPU 可使用 Google Colab：
+https://colab.research.google.com/drive/1RgRKhBo9vBAQ3ZUqt4APBzsT-u1ECB18
 
 ## License
 
 MIT License
-
-## Contributing
-
-歡迎提交 Issue 和 Pull Request！
