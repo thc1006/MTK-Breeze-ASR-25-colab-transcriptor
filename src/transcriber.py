@@ -182,11 +182,12 @@ class BreezeTranscriber:
     """
     Breeze-ASR-25 轉錄器
 
-    針對 RTX 3050 Laptop 4GB VRAM 深度優化
+    使用 HuggingFace Transformers 載入官方模型，
+    搭配 Silero-VAD 做語音區段偵測。
     """
 
-    # 預轉換的 faster-whisper 模型
-    MODEL_ID = "SoybeanMilk/faster-whisper-Breeze-ASR-25"
+    # 官方 MediaTek Breeze-ASR-25 模型
+    MODEL_ID = "MediaTek-Research/Breeze-ASR-25"
 
     def __init__(
         self,
@@ -199,31 +200,28 @@ class BreezeTranscriber:
         初始化轉錄器
 
         Args:
-            model_id: 模型 ID，預設使用 Breeze-ASR-25
+            model_id: HuggingFace 模型 ID
             device: 裝置 ("auto", "cuda", "cpu")
-            config: 優化配置，預設自動偵測硬體 (None = 自動)
-            download_root: 模型下載目錄
+            config: 優化配置，None = 自動偵測硬體
+            download_root: 模型下載目錄（對應 HF cache_dir）
         """
         self.model_id = model_id or self.MODEL_ID
         self.download_root = download_root
 
-        # 設定裝置
         self.device = self._detect_device(device)
 
-        # 自動或手動配置
         if config is None:
             self.config = self._auto_config()
         else:
             self.config = config
 
-        # 套用 CUDA 優化
         if self.device == "cuda":
             self._setup_cuda_optimizations()
 
-        # 延遲載入模型
-        self._model = None
-        self._batched_model = None
-        self._use_batched = False
+        # 延遲載入
+        self._pipeline = None
+        self._processor = None
+        self._vad_model = None
 
     def _detect_device(self, device: str) -> str:
         """偵測最佳裝置"""
@@ -236,104 +234,158 @@ class BreezeTranscriber:
     def _auto_config(self) -> GPUConfig:
         """根據 VRAM 和 compute capability 自動選擇最佳配置"""
         if self.device != "cuda":
-            print("[CPU] 使用 INT8 量化")
-            return GPUConfig(compute_type="int8", tier_name="cpu")
+            print("[CPU] 使用 float32 模式")
+            return GPUConfig(dtype="float32", quant_mode="none", tier_name="cpu")
 
         props = torch.cuda.get_device_properties(0)
         vram_mb = props.total_memory // (1024 * 1024)
         gpu_name = torch.cuda.get_device_name(0)
-        cc = props.major + props.minor / 10  # 例如 8.6, 8.9, 9.0
+        cc = props.major + props.minor / 10
 
         print(f"[GPU] {gpu_name}")
         print(f"[VRAM] {vram_mb} MB")
         print(f"[CC] {props.major}.{props.minor}")
 
-        # 查表：找到 VRAM 所屬的層級
+        # 查表
         matched = None
         for tier in _VRAM_TIERS:
             if vram_mb <= tier[1]:
                 matched = tier
                 break
 
-        # 超過所有層級就用 ultra
         if matched is None:
             matched = _ULTRA_TIER
 
-        tier_name, _, compute_type, beam, batch, cond_prev, workers = matched
+        tier_name, _, dtype, quant_mode, beam, cond_prev, chunk_s = matched
 
-        # Ampere+ (CC >= 8.0) 且 high 以上層級：升級到 bfloat16
-        if cc >= 8.0 and compute_type == "float16" and tier_name in ("high", "very_high", "ultra"):
-            compute_type = "bfloat16"
+        # Ampere+ (CC >= 8.0) 且 high 以上：升級到 bfloat16
+        if cc >= 8.0 and dtype == "float16" and tier_name in ("high", "very_high", "ultra"):
+            dtype = "bfloat16"
 
         cfg = GPUConfig(
-            compute_type=compute_type,
+            dtype=dtype,
+            quant_mode=quant_mode,
             beam_size=beam,
-            batch_size=batch,
             condition_on_previous_text=cond_prev,
-            num_workers=workers,
+            chunk_length_s=chunk_s,
             gpu_name=gpu_name,
             vram_mb=vram_mb,
             compute_capability=cc,
             tier_name=tier_name,
         )
 
-        batch_label = f", batch={batch}" if batch > 0 else ""
-        print(f"[Profile] {tier_name} - {compute_type}, beam={beam}{batch_label}")
+        quant_label = f", quant={quant_mode}" if quant_mode != "none" else ""
+        chunk_label = f", chunk={chunk_s}s" if chunk_s > 0 else ""
+        print(f"[Profile] {tier_name} - {dtype}{quant_label}, beam={beam}{chunk_label}")
 
         return cfg
 
     def _setup_cuda_optimizations(self):
         """設定 CUDA 優化"""
-        # cuDNN benchmark：自動選擇最快的卷積演算法
         torch.backends.cudnn.benchmark = True
 
-        # 允許 TF32（Ampere 架構加速）
         if hasattr(torch.backends.cuda, "matmul"):
             torch.backends.cuda.matmul.allow_tf32 = True
         if hasattr(torch.backends.cudnn, "allow_tf32"):
             torch.backends.cudnn.allow_tf32 = True
 
-        # 記憶體分配策略
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
         print("[CUDA] 優化設定完成")
 
+    # ------------------------------------------------------------------
+    # dtype 解析
+    # ------------------------------------------------------------------
+
+    def _resolve_dtype(self, dtype_str: str) -> torch.dtype:
+        """把字串 dtype 轉成 torch.dtype"""
+        mapping = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        return mapping.get(dtype_str, torch.float16)
+
+    # ------------------------------------------------------------------
+    # 模型載入（含量化降級鏈）
+    # ------------------------------------------------------------------
+
     @property
-    def model(self):
-        """延遲載入模型"""
-        if self._model is None:
+    def pipeline(self):
+        """延遲載入 pipeline"""
+        if self._pipeline is None:
             self._load_model()
-        return self._model
+        return self._pipeline
 
     def _load_model(self):
-        """載入 faster-whisper 模型（含優化參數）"""
-        from faster_whisper import WhisperModel
+        """載入 HF Whisper 模型 + 建立 ASR pipeline"""
+        from transformers import (
+            AutoModelForSpeechSeq2Seq,
+            AutoProcessor,
+            pipeline,
+        )
 
         print(f"[Model] {self.model_id}")
         print(f"[Device] {self.device}")
-        print(f"[Compute] {self.config.compute_type}")
-        print(f"[Beam] {self.config.beam_size}")
 
-        self._model = WhisperModel(
+        dtype = getattr(self.config, "dtype", "float16")
+        quant_mode = getattr(self.config, "quant_mode", "none")
+        print(f"[dtype] {dtype}, quant={quant_mode}")
+
+        # 載入 processor
+        self._processor = AutoProcessor.from_pretrained(
             self.model_id,
-            device=self.device,
-            compute_type=self.config.compute_type,
-            download_root=self.download_root,
-            cpu_threads=self.config.cpu_threads,
-            num_workers=self.config.num_workers,
+            cache_dir=self.download_root,
         )
 
-        # 嘗試建立批次推論管線（VRAM 夠大才有 batch_size > 0）
-        batch_size = getattr(self.config, "batch_size", 0)
-        if batch_size > 0:
+        # 嘗試量化載入，失敗就降級
+        model = self._try_load_quantized(quant_mode, dtype)
+
+        if model is None:
+            # 量化失敗，降級為 float16 + device_map auto
+            print("[Fallback] 量化載入失敗，嘗試 float16 + device_map=auto")
             try:
-                from faster_whisper import BatchedInferencePipeline
-                self._batched_model = BatchedInferencePipeline(model=self._model)
-                self._use_batched = True
-                print(f"[Batch] BatchedInferencePipeline enabled, batch_size={batch_size}")
-            except (ImportError, AttributeError):
-                # 舊版 faster-whisper 不支援，降級為一般模式
-                print("[Batch] BatchedInferencePipeline not available, fallback to normal mode")
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    cache_dir=self.download_root,
+                )
+            except Exception as e:
+                # 最後手段：純 CPU float32
+                print(f"[Fallback] GPU 載入失敗 ({e})，降級為 CPU")
+                self.device = "cpu"
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    self.model_id,
+                    torch_dtype=torch.float32,
+                    cache_dir=self.download_root,
+                )
+
+        # 如果沒有用 device_map，手動搬到指定裝置
+        if not hasattr(model, "hf_device_map"):
+            if self.device == "cuda":
+                model = model.to("cuda")
+
+        # 建立 ASR pipeline
+        chunk_length_s = getattr(self.config, "chunk_length_s", 30)
+        pipe_kwargs = {
+            "model": model,
+            "tokenizer": self._processor.tokenizer,
+            "feature_extractor": self._processor.feature_extractor,
+            "torch_dtype": self._resolve_dtype(dtype) if self.device != "cpu" else torch.float32,
+        }
+
+        # chunk_length_s > 0 表示啟用分段處理（低 VRAM 情境）
+        if chunk_length_s > 0:
+            pipe_kwargs["chunk_length_s"] = chunk_length_s
+            pipe_kwargs["batch_size"] = 1
+            print(f"[Pipeline] chunk_length_s={chunk_length_s}")
+        else:
+            print("[Pipeline] 整段處理模式")
+
+        self._pipeline = pipeline(
+            "automatic-speech-recognition",
+            **pipe_kwargs,
+        )
 
         # 顯示 VRAM 使用量
         if self.device == "cuda":
@@ -344,6 +396,150 @@ class BreezeTranscriber:
 
         print("[Ready]")
 
+    def _try_load_quantized(self, quant_mode: str, dtype: str):
+        """
+        嘗試用 bitsandbytes 量化載入模型
+
+        降級鏈: bnb_4bit -> bnb_8bit -> None（由呼叫者處理）
+        """
+        if quant_mode == "none":
+            # 不量化，直接載入
+            from transformers import AutoModelForSpeechSeq2Seq
+            torch_dtype = self._resolve_dtype(dtype)
+            return AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_id,
+                torch_dtype=torch_dtype,
+                cache_dir=self.download_root,
+            )
+
+        # 準備量化嘗試順序
+        attempts = []
+        if quant_mode == "bnb_4bit":
+            attempts = ["bnb_4bit", "bnb_8bit"]
+        elif quant_mode == "bnb_8bit":
+            attempts = ["bnb_8bit"]
+
+        for mode in attempts:
+            model = self._load_with_bnb(mode)
+            if model is not None:
+                return model
+
+        return None
+
+    def _load_with_bnb(self, mode: str):
+        """嘗試用指定的 bitsandbytes 模式載入"""
+        try:
+            from transformers import AutoModelForSpeechSeq2Seq, BitsAndBytesConfig
+
+            if mode == "bnb_4bit":
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                )
+                print("[Quantize] 嘗試 NF4 4-bit 量化...")
+            else:
+                bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+                print("[Quantize] 嘗試 8-bit 量化...")
+
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self.model_id,
+                quantization_config=bnb_config,
+                device_map="auto",
+                cache_dir=self.download_root,
+            )
+            print(f"[Quantize] {mode} 載入成功")
+            return model
+
+        except (ImportError, RuntimeError, ValueError) as e:
+            print(f"[Quantize] {mode} 失敗: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # 音檔載入
+    # ------------------------------------------------------------------
+
+    def _load_audio(self, audio_path: Path) -> Tuple[np.ndarray, int]:
+        """
+        載入音檔並轉換為 16kHz mono numpy array
+
+        Returns:
+            (audio_array, sample_rate) -- sample_rate 固定 16000
+        """
+        import torchaudio
+
+        waveform, sr = torchaudio.load(str(audio_path))
+
+        # 轉 mono
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        # 重採樣到 16kHz
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+            waveform = resampler(waveform)
+
+        # 轉 numpy，去掉 channel 維度
+        audio_np = waveform.squeeze(0).numpy()
+        return audio_np, 16000
+
+    # ------------------------------------------------------------------
+    # Silero-VAD 整合
+    # ------------------------------------------------------------------
+
+    def _run_vad(self, audio_array: np.ndarray, sample_rate: int) -> Optional[List[Tuple[float, float]]]:
+        """
+        用 Silero-VAD 偵測語音區段
+
+        Args:
+            audio_array: 16kHz mono numpy array
+            sample_rate: 取樣率（應該是 16000）
+
+        Returns:
+            語音區段列表 [(start_sec, end_sec), ...] 或 None（VAD 不可用時）
+        """
+        try:
+            from silero_vad import load_silero_vad, get_speech_timestamps
+        except ImportError:
+            print("[VAD] silero-vad 套件未安裝，跳過 VAD")
+            return None
+
+        if self._vad_model is None:
+            self._vad_model = load_silero_vad()
+            print("[VAD] Silero-VAD 模型已載入")
+
+        # 轉成 torch tensor 給 VAD
+        audio_tensor = torch.from_numpy(audio_array).float()
+
+        timestamps = get_speech_timestamps(
+            audio_tensor,
+            self._vad_model,
+            sampling_rate=sample_rate,
+            threshold=self.config.vad_threshold,
+            min_speech_duration_ms=self.config.vad_min_speech_ms,
+            min_silence_duration_ms=self.config.vad_min_silence_ms,
+            speech_pad_ms=self.config.vad_speech_pad_ms,
+            max_speech_duration_s=self.config.vad_max_speech_duration,
+        )
+
+        if not timestamps:
+            print("[VAD] 沒有偵測到語音")
+            return []
+
+        # 轉成秒數
+        segments = []
+        for ts in timestamps:
+            start_sec = ts["start"] / sample_rate
+            end_sec = ts["end"] / sample_rate
+            segments.append((start_sec, end_sec))
+
+        print(f"[VAD] 偵測到 {len(segments)} 個語音區段")
+        return segments
+
+    # ------------------------------------------------------------------
+    # 轉錄
+    # ------------------------------------------------------------------
+
     def transcribe(
         self,
         audio_path: Union[str, Path],
@@ -352,16 +548,16 @@ class BreezeTranscriber:
         initial_prompt: Optional[str] = None,
     ) -> Tuple[List[TranscriptSegment], Dict]:
         """
-        轉錄音檔（使用優化參數）
+        轉錄音檔
 
         Args:
             audio_path: 音檔路徑
-            language: 語言代碼 ("zh" 中文, "en" 英文)
-            task: 任務類型 ("transcribe" 轉錄, "translate" 翻譯)
-            initial_prompt: 初始提示詞（可提升特定領域準確度）
+            language: 語言代碼 ("zh", "en")
+            task: "transcribe" 或 "translate"
+            initial_prompt: 初始提示詞
 
         Returns:
-            (segments, info) - 轉錄片段列表和統計資訊
+            (segments, stats)
         """
         audio_path = Path(audio_path)
         if not audio_path.exists():
@@ -369,85 +565,139 @@ class BreezeTranscriber:
 
         print(f"\n[Transcribe] {audio_path.name}")
 
-        # 建構 VAD 參數
-        vad_params = None
+        # 載入音檔
+        audio_array, sr = self._load_audio(audio_path)
+        duration = len(audio_array) / sr
+        print(f"[Audio] {duration:.1f}s, {sr}Hz")
+
+        # 組裝 generate_kwargs 給 pipeline
+        generate_kwargs = {
+            "language": language,
+            "task": task,
+            "num_beams": self.config.beam_size,
+            "compression_ratio_threshold": self.config.compression_ratio_threshold,
+            "logprob_threshold": self.config.log_prob_threshold,
+            "no_speech_threshold": self.config.no_speech_threshold,
+            "condition_on_prev_tokens": self.config.condition_on_previous_text,
+        }
+
+        # initial_prompt 透過 prompt_ids 傳入
+        if initial_prompt and self._processor is not None:
+            prompt_ids = self._processor.tokenizer.encode(
+                initial_prompt, add_special_tokens=False
+            )
+            # Whisper prompt 上限 224 tokens
+            if len(prompt_ids) > 224:
+                prompt_ids = prompt_ids[:224]
+            generate_kwargs["prompt_ids"] = torch.tensor([prompt_ids], dtype=torch.long)
+
+        # VAD 前處理
+        vad_segments = None
         if self.config.vad_filter:
-            vad_params = {
-                "threshold": self.config.vad_threshold,
-                "min_speech_duration_ms": self.config.vad_min_speech_ms,
-                "min_silence_duration_ms": self.config.vad_min_silence_ms,
-                "speech_pad_ms": self.config.vad_speech_pad_ms,
-                "max_speech_duration_s": self.config.vad_max_speech_duration,
-            }
+            vad_segments = self._run_vad(audio_array, sr)
 
-        # 共用的轉錄參數
-        transcribe_kwargs = dict(
-            language=language,
-            task=task,
-            beam_size=self.config.beam_size,
-            vad_filter=self.config.vad_filter,
-            vad_parameters=vad_params,
-            word_timestamps=self.config.word_timestamps,
-            condition_on_previous_text=self.config.condition_on_previous_text,
-            compression_ratio_threshold=self.config.compression_ratio_threshold,
-            log_prob_threshold=self.config.log_prob_threshold,
-            no_speech_threshold=self.config.no_speech_threshold,
-            initial_prompt=initial_prompt,
-            without_timestamps=self.config.without_timestamps,
-        )
-
-        # 批次模式 vs 一般模式
-        if self._use_batched and self._batched_model is not None:
-            batch_size = getattr(self.config, "batch_size", 16)
-            print(f"[Mode] Batched (batch_size={batch_size})")
-            segments_raw, info = self._batched_model.transcribe(
-                str(audio_path),
-                batch_size=batch_size,
-                **transcribe_kwargs,
-            )
+        # 根據 VAD 結果選擇轉錄策略
+        if vad_segments is not None and len(vad_segments) > 0:
+            segments = self._transcribe_with_vad(audio_array, sr, vad_segments, generate_kwargs)
         else:
-            segments_raw, info = self.model.transcribe(
-                str(audio_path),
-                **transcribe_kwargs,
-            )
+            segments = self._transcribe_full(audio_array, generate_kwargs)
 
-        # 轉換為 TranscriptSegment
-        segments = []
-        total_chars = 0
-
-        for seg in segments_raw:
-            text = seg.text.strip()
-            if text:  # 跳過空白段落
-                segment = TranscriptSegment(
-                    start=seg.start,
-                    end=seg.end,
-                    text=text,
-                )
-                segments.append(segment)
-                total_chars += len(text)
-
-        # 統計資訊
-        duration = info.duration if hasattr(info, "duration") else 0
+        # 統計
+        total_chars = sum(len(seg.text) for seg in segments)
         stats = {
             "duration": duration,
-            "language": info.language,
-            "language_probability": info.language_probability,
+            "language": language,
+            "language_probability": 0.0,  # HF pipeline 不直接回傳此值
             "segments": len(segments),
             "total_chars": total_chars,
         }
 
         print(f"[Done] {len(segments)} segments, {total_chars} chars")
-
-        # 清理 GPU 記憶體
         self._cleanup_memory()
 
         return segments, stats
+
+    def _transcribe_full(
+        self, audio_array: np.ndarray, generate_kwargs: Dict
+    ) -> List[TranscriptSegment]:
+        """整段音檔丟給 pipeline 處理"""
+        pipe = self.pipeline
+
+        result = pipe(
+            audio_array.copy(),
+            return_timestamps=True,
+            generate_kwargs=generate_kwargs,
+        )
+
+        return self._parse_pipeline_result(result)
+
+    def _transcribe_with_vad(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int,
+        vad_segments: List[Tuple[float, float]],
+        generate_kwargs: Dict,
+    ) -> List[TranscriptSegment]:
+        """把 VAD 區段逐段送進 pipeline，偏移時間戳"""
+        pipe = self.pipeline
+        all_segments = []
+
+        for i, (start_sec, end_sec) in enumerate(vad_segments):
+            start_sample = int(start_sec * sample_rate)
+            end_sample = int(end_sec * sample_rate)
+            chunk = audio_array[start_sample:end_sample]
+
+            if len(chunk) < 1600:  # 太短就跳過（<0.1s）
+                continue
+
+            result = pipe(
+                chunk.copy(),
+                return_timestamps=True,
+                generate_kwargs=generate_kwargs,
+            )
+
+            # 解析結果並偏移時間戳
+            for seg in self._parse_pipeline_result(result):
+                seg.start += start_sec
+                seg.end += start_sec
+                all_segments.append(seg)
+
+        return all_segments
+
+    def _parse_pipeline_result(self, result: Dict) -> List[TranscriptSegment]:
+        """把 HF pipeline 的輸出轉成 TranscriptSegment 列表"""
+        segments = []
+
+        # pipeline 回傳格式: {"text": "...", "chunks": [{"text": ..., "timestamp": (start, end)}]}
+        chunks = result.get("chunks", [])
+
+        if not chunks:
+            # 沒有 chunks（可能 return_timestamps 沒生效），用整段 text
+            text = result.get("text", "").strip()
+            if text:
+                segments.append(TranscriptSegment(start=0.0, end=0.0, text=text))
+            return segments
+
+        for chunk in chunks:
+            text = chunk.get("text", "").strip()
+            if not text:
+                continue
+            ts = chunk.get("timestamp", (0.0, 0.0))
+            start = ts[0] if ts[0] is not None else 0.0
+            end = ts[1] if ts[1] is not None else start
+            segments.append(TranscriptSegment(start=start, end=end, text=text))
+
+        return segments
 
     def _cleanup_memory(self):
         """清理記憶體"""
         if self.device == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
+
+    # ------------------------------------------------------------------
+    # 便捷方法
+    # ------------------------------------------------------------------
 
     def transcribe_to_text(self, audio_path: Union[str, Path], **kwargs) -> str:
         """轉錄並返回純文字"""
@@ -469,24 +719,27 @@ class BreezeTranscriber:
 
     def get_config_summary(self) -> str:
         """取得配置摘要"""
+        dtype = getattr(self.config, "dtype", "unknown")
+        quant = getattr(self.config, "quant_mode", "none")
+        chunk_s = getattr(self.config, "chunk_length_s", 30)
+
         lines = [
             f"Device: {self.device}",
-            f"Compute: {self.config.compute_type}",
+            f"dtype: {dtype}",
             f"Beam: {self.config.beam_size}",
             f"VAD: {self.config.vad_filter} (threshold={self.config.vad_threshold})",
-            f"Chunk: {self.config.chunk_length}s",
+            f"Chunk: {chunk_s}s",
         ]
 
-        # GPUConfig 才有偵測資訊
+        if quant != "none":
+            lines.insert(2, f"Quantize: {quant}")
+
         tier = getattr(self.config, "tier_name", "")
         if tier and tier != "unknown":
             lines.insert(0, f"Tier: {tier}")
         gpu = getattr(self.config, "gpu_name", "")
         if gpu:
             lines.insert(0, f"GPU: {gpu}")
-        batch = getattr(self.config, "batch_size", 0)
-        if batch > 0:
-            lines.append(f"Batch: {batch}")
 
         return "\n".join(lines) + "\n"
 
