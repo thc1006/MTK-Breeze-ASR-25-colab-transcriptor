@@ -9,6 +9,14 @@ noisereduce>=3.0.0
 pyloudnorm>=0.1.1
 pydub>=0.25.1
 
+# Speech-to-Text (Breeze-ASR-25, HuggingFace Transformers backend)
+transformers>=4.40.0
+accelerate>=0.26.0
+torch>=2.0.0
+torchaudio>=2.0.0
+silero-vad>=5.1
+bitsandbytes>=0.43.0
+
 # Progress bar
 tqdm>=4.65.0
 
