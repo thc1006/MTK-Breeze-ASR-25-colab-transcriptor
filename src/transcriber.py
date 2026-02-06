@@ -55,6 +55,9 @@ class RTX3050Config:
     word_timestamps: bool = False
     without_timestamps: bool = False
 
+    # --- 音頻前處理 ---
+    enhance_audio: bool = False  # 啟用降噪+人聲增強前處理
+
 
 @dataclass
 class QualityConfig:
@@ -76,6 +79,7 @@ class QualityConfig:
     no_speech_threshold: float = 0.6
     word_timestamps: bool = False
     without_timestamps: bool = False
+    enhance_audio: bool = False
 
 
 @dataclass
@@ -114,6 +118,9 @@ class GPUConfig:
     # --- 輸出控制 ---
     word_timestamps: bool = False
     without_timestamps: bool = False
+
+    # --- 音頻前處理 ---
+    enhance_audio: bool = False
 
     # --- GPU 偵測資訊（唯讀紀錄） ---
     gpu_name: str = ""
@@ -222,6 +229,7 @@ class BreezeTranscriber:
         self._pipeline = None
         self._processor = None
         self._vad_model = None
+        self._enhancer = None
 
     def _detect_device(self, device: str) -> str:
         """偵測最佳裝置"""
@@ -544,6 +552,46 @@ class BreezeTranscriber:
         return segments
 
     # ------------------------------------------------------------------
+    # 音頻前處理
+    # ------------------------------------------------------------------
+
+    def _preprocess_audio(self, audio_array: np.ndarray, sr: int) -> np.ndarray:
+        """ASR 前處理：降噪 + 壓縮 + 中頻增強 + 響度標準化
+
+        延遲載入 AudioEnhancer，用保守的 ASR 前處理參數：
+        - 降噪強度 0.5（避免過度消除語音細節）
+        - mid_boost=2.0（增強人聲頻段 250-4000Hz）
+        - 不做低頻/高頻增強（ASR 不需要）
+
+        Args:
+            audio_array: 16kHz mono numpy array
+            sr: 取樣率
+
+        Returns:
+            增強後的 numpy array
+        """
+        if self._enhancer is None:
+            from .enhancer import AudioEnhancer
+            from .config import EnhanceConfig
+
+            self._enhancer = AudioEnhancer(EnhanceConfig(
+                sample_rate=sr,
+                use_gpu=True if self.device == "cuda" else False,
+                enable_denoise=True,
+                denoise_strength=0.5,
+                enable_compression=True,
+                enable_eq=True,
+                bass_boost=0.0,
+                mid_boost=2.0,
+                treble_boost=0.0,
+            ))
+
+        enhanced, stats = self._enhancer.process_array(audio_array, sr)
+        gain = stats.get("gain", 0.0)
+        print(f"[Enhance] gain={gain:+.1f} dB")
+        return enhanced
+
+    # ------------------------------------------------------------------
     # 轉錄
     # ------------------------------------------------------------------
 
@@ -598,6 +646,12 @@ class BreezeTranscriber:
             if len(prompt_ids) > 224:
                 prompt_ids = prompt_ids[:224]
             generate_kwargs["prompt_ids"] = torch.tensor([prompt_ids], dtype=torch.long)
+
+        # 音頻前處理（降噪 + 壓縮 + 人聲增強），在 VAD 之前做
+        if getattr(self.config, "enhance_audio", False):
+            print("[Enhance] 執行音頻前處理...")
+            audio_array = self._preprocess_audio(audio_array, sr)
+            print("[Enhance] 前處理完成")
 
         # VAD 前處理
         vad_segments = None

@@ -39,6 +39,7 @@ Examples:
   %(prog)s audio.mp3 --srt              # 同時輸出 SRT 字幕
   %(prog)s audio.m4a --lang en          # 英文轉錄
   %(prog)s audio.m4a --cpu              # 強制使用 CPU
+  %(prog)s audio.m4a --enhance          # 啟用音頻前處理（降噪+人聲增強）
 
 Optimization Modes:
   speed   - beam=1, NF4 量化, VAD aggressive (低 VRAM 專用)
@@ -75,6 +76,8 @@ Optimization Modes:
         help="Pipeline 分段長度 (秒)，0=不分段"
     )
 
+    parser.add_argument("--enhance", action="store_true",
+        help="啟用音頻前處理（降噪 + 人聲增強），可提升嘈雜環境的轉錄品質")
     parser.add_argument("--no-vad", action="store_true", help="停用 VAD 過濾")
     parser.add_argument("-q", "--quiet", action="store_true", help="安靜模式")
 
@@ -125,9 +128,17 @@ def main():
     if args.no_vad and config is not None:
         config.vad_filter = False
 
+    # 音頻前處理
+    if args.enhance and config is not None:
+        config.enhance_audio = True
+
     # 初始化轉錄器
     device = "cpu" if args.cpu else "auto"
     transcriber = BreezeTranscriber(device=device, config=config)
+
+    # auto mode 時 config=None，enhance_audio 要在 init 後設定
+    if args.enhance:
+        transcriber.config.enhance_audio = True
 
     # --chunk-length 覆蓋
     if args.chunk_length is not None:
@@ -170,6 +181,8 @@ def main():
         detail += f", beam={transcriber.config.beam_size}"
         if chunk_s > 0:
             detail += f", chunk={chunk_s}s"
+        if getattr(transcriber.config, "enhance_audio", False):
+            detail += ", enhance=ON"
         print(f"[Config] {detail}")
         print()
 
