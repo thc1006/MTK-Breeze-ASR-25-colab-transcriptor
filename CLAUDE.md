@@ -33,6 +33,12 @@ python transcribe_cli.py audio.mp3 --lang en
 
 # 手動指定 pipeline 分段長度（秒），0=不分段
 python transcribe_cli.py audio.m4a --mode auto --chunk-length 0
+
+# 啟用音頻前處理（降噪 + 人聲增強），適合嘈雜環境
+python transcribe_cli.py audio.m4a --enhance
+
+# auto mode + 前處理
+python transcribe_cli.py audio.m4a --mode auto --enhance
 ```
 
 ### 音頻增強（降噪/響度調整）
@@ -111,6 +117,7 @@ bnb_4bit -> bnb_8bit -> float16 + device_map="auto" -> 純 CPU float32
 - **後端**: HuggingFace Transformers + `pipeline("automatic-speech-recognition")`
 - **VAD**: Silero-VAD (外掛預處理，跳過靜音段)
 - **量化**: bitsandbytes NF4/INT8 (低 VRAM GPU)
+- **前處理**: `--enhance` 啟用 AudioEnhancer 作為 ASR 前處理（GPU 頻譜降噪 + 壓縮 + 人聲增強）
 
 ### 配置類別
 
@@ -134,6 +141,7 @@ python transcribe_cli.py --help
 # 主要參數：
 #   --mode {speed,quality,auto}  優化模式（auto 會自動偵測 GPU）
 #   --chunk-length SECS          Pipeline 分段長度（秒），0=不分段
+#   --enhance                   啟用音頻前處理（降噪 + 人聲增強）
 #   --srt                        輸出 SRT 字幕
 #   --lang {zh,en}              語言
 #   -o OUTPUT                   輸出路徑

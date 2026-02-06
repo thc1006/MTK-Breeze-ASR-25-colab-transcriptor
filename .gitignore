@@ -41,16 +41,13 @@ Thumbs.db
 input/
 output/
 
-# Audio files (keep test file)
+# Audio files
 *.wav
 *.mp3
 *.m4a
-*.wav
 *.flac
 *.ogg
 *.aac
-!01312.m4a
-!examples/*.wav
 
 # Transcription outputs
 *_transcript.txt
