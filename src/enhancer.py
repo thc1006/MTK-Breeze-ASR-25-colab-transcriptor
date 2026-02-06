@@ -139,36 +139,31 @@ class AudioEnhancer:
             n_jobs=-1  # Use all CPU cores
         )
     
-    def compress(self, audio: np.ndarray, sr: int) -> np.ndarray:
-        """Apply dynamic range compression.
-        
+    def _compress_tensor(self, audio_tensor: torch.Tensor, sr: int) -> torch.Tensor:
+        """在 GPU tensor 上執行動態範圍壓縮（不搬移裝置）
+
         Args:
-            audio: Audio data.
-            sr: Sample rate.
-            
+            audio_tensor: 1-D float tensor，已經在 self.device 上
+            sr: 取樣率
+
         Returns:
-            Compressed audio data.
+            壓縮後的 tensor，同裝置
         """
         if not self.config.enable_compression:
-            return audio
-        
-        # Move to GPU
-        audio_tensor = torch.from_numpy(audio).float().to(self.device)
-        
-        # Calculate envelope
+            return audio_tensor
+
         abs_audio = torch.abs(audio_tensor)
-        
-        # Smooth envelope with attack time
+
+        # 用 attack time 算平滑 envelope
         window_size = int(sr * self.config.compression_attack / 1000)
         if window_size > 1:
-            kernel = torch.ones(window_size, device=self.device) / window_size
+            kernel = torch.ones(window_size, device=audio_tensor.device) / window_size
             envelope = torch.nn.functional.conv1d(
                 abs_audio.unsqueeze(0).unsqueeze(0),
                 kernel.unsqueeze(0).unsqueeze(0),
                 padding=window_size // 2
             ).squeeze()
-            
-            # Ensure same length
+
             if len(envelope) != len(audio_tensor):
                 envelope = torch.nn.functional.interpolate(
                     envelope.unsqueeze(0).unsqueeze(0),
@@ -177,51 +172,42 @@ class AudioEnhancer:
                 ).squeeze()
         else:
             envelope = abs_audio
-        
-        # Convert to dB
+
         envelope_db = 20 * torch.log10(envelope + 1e-10)
-        
-        # Calculate gain reduction
+
         threshold = self.config.compression_threshold
         ratio = self.config.compression_ratio
-        
         gain_db = torch.where(
             envelope_db > threshold,
             threshold + (envelope_db - threshold) / ratio - envelope_db,
             torch.zeros_like(envelope_db)
         )
-        
-        # Apply gain
+
         gain_linear = 10 ** (gain_db / 20)
-        compressed = audio_tensor * gain_linear
-        
-        return compressed.cpu().numpy()
-    
-    def apply_eq(self, audio: np.ndarray, sr: int) -> np.ndarray:
-        """Apply EQ adjustments.
-        
+        return audio_tensor * gain_linear
+
+    def _apply_eq_tensor(self, audio_tensor: torch.Tensor, sr: int) -> torch.Tensor:
+        """在 GPU tensor 上執行 EQ 調整（不搬移裝置）
+
         Args:
-            audio: Audio data.
-            sr: Sample rate.
-            
+            audio_tensor: 1-D float tensor，已經在 self.device 上
+            sr: 取樣率
+
         Returns:
-            EQ-adjusted audio data.
+            EQ 調整後的 tensor，同裝置
         """
         if not self.config.enable_eq:
-            return audio
-        
-        # Move to GPU
-        audio_tensor = torch.from_numpy(audio).float().to(self.device)
-        
-        # Bass boost (< 250 Hz)
+            return audio_tensor
+
+        # 低頻增強 (< 250 Hz)
         if self.config.bass_boost != 0:
             low_shelf = torchaudio.functional.lowpass_biquad(
                 audio_tensor.unsqueeze(0), sr, 250
             ).squeeze(0)
             bass_gain = 10 ** (self.config.bass_boost / 20)
             audio_tensor = audio_tensor + (low_shelf - audio_tensor) * (bass_gain - 1) * 0.5
-        
-        # Mid boost (250-4000 Hz) - voice range
+
+        # 中頻增強 (250-4000 Hz) - 人聲頻段
         if self.config.mid_boost != 0:
             mid_gain = 10 ** (self.config.mid_boost / 20)
             mid_low = torchaudio.functional.highpass_biquad(
@@ -231,16 +217,80 @@ class AudioEnhancer:
                 mid_low.unsqueeze(0), sr, 4000
             ).squeeze(0)
             audio_tensor = audio_tensor + mid_band * (mid_gain - 1) * 0.3
-        
-        # Treble boost (> 4000 Hz)
+
+        # 高頻增強 (> 4000 Hz)
         if self.config.treble_boost != 0:
             high_shelf = torchaudio.functional.highpass_biquad(
                 audio_tensor.unsqueeze(0), sr, 4000
             ).squeeze(0)
             treble_gain = 10 ** (self.config.treble_boost / 20)
             audio_tensor = audio_tensor + high_shelf * (treble_gain - 1) * 0.5
-        
+
+        return audio_tensor
+
+    def _gpu_pipeline(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """在 GPU 上連續執行 compress + EQ，只搬移一次
+
+        原本 compress() 和 apply_eq() 各自做 numpy->GPU->numpy（共 4 次 transfer）。
+        合併成 1 次搬進 + 1 次搬出 = 2 次 transfer。
+
+        Args:
+            audio: numpy array
+            sr: 取樣率
+
+        Returns:
+            處理後的 numpy array
+        """
+        need_compress = self.config.enable_compression
+        need_eq = self.config.enable_eq
+
+        if not need_compress and not need_eq:
+            return audio
+
+        # 搬進 GPU（1 次 transfer）
+        audio_tensor = torch.from_numpy(audio).float().to(self.device)
+
+        if need_compress:
+            audio_tensor = self._compress_tensor(audio_tensor, sr)
+        if need_eq:
+            audio_tensor = self._apply_eq_tensor(audio_tensor, sr)
+
+        # 搬回 CPU（1 次 transfer）
         return audio_tensor.cpu().numpy()
+
+    def compress(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Apply dynamic range compression.
+
+        Args:
+            audio: Audio data.
+            sr: Sample rate.
+
+        Returns:
+            Compressed audio data.
+        """
+        if not self.config.enable_compression:
+            return audio
+
+        audio_tensor = torch.from_numpy(audio).float().to(self.device)
+        result = self._compress_tensor(audio_tensor, sr)
+        return result.cpu().numpy()
+
+    def apply_eq(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """Apply EQ adjustments.
+
+        Args:
+            audio: Audio data.
+            sr: Sample rate.
+
+        Returns:
+            EQ-adjusted audio data.
+        """
+        if not self.config.enable_eq:
+            return audio
+
+        audio_tensor = torch.from_numpy(audio).float().to(self.device)
+        result = self._apply_eq_tensor(audio_tensor, sr)
+        return result.cpu().numpy()
     
     def normalize_loudness(self, audio: np.ndarray) -> np.ndarray:
         """Normalize audio to target loudness.
@@ -311,10 +361,9 @@ class AudioEnhancer:
         meter = self._get_meter(sr)
         original_loudness = meter.integrated_loudness(audio)
 
-        # 增強流程
+        # 增強流程：denoise (CPU) -> compress + EQ (GPU pipeline)
         audio = self.denoise(audio, sr)
-        audio = self.compress(audio, sr)
-        audio = self.apply_eq(audio, sr)
+        audio = self._gpu_pipeline(audio, sr)
 
         # 響度標準化（用對應取樣率的 meter）
         current_loudness = meter.integrated_loudness(audio)
@@ -367,10 +416,9 @@ class AudioEnhancer:
         audio, sr = self.load_audio(input_path)
         original_loudness = self.meter.integrated_loudness(audio)
         
-        # Process pipeline
+        # 增強流程：denoise (CPU) -> compress + EQ (GPU pipeline) -> loudness
         audio = self.denoise(audio, sr)
-        audio = self.compress(audio, sr)
-        audio = self.apply_eq(audio, sr)
+        audio = self._gpu_pipeline(audio, sr)
         audio = self.normalize_loudness(audio)
         
         # Get final stats
