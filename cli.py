@@ -225,7 +225,7 @@ def main():
     # Print config
     if not args.quiet:
         print("=" * 50)
-        print("🎙️ Audio Enhancer")
+        print("Audio Enhancer")
         print("=" * 50)
         print(config)
         print()
@@ -241,7 +241,7 @@ def main():
     if input_path.is_file():
         # Single file processing
         if not args.quiet:
-            print(f"\n📂 Processing: {input_path.name}")
+            print(f"\n[Processing] {input_path.name}")
         
         # If output is a directory, generate filename
         if output_path.is_dir() or not output_path.suffix:
@@ -252,20 +252,20 @@ def main():
             stats = enhancer.process(input_path, output_path)
             
             if not args.quiet:
-                print(f"\n✅ Success!")
+                print(f"\n[OK] Success!")
                 print(f"   Original: {stats['original_loudness']:.1f} LUFS")
                 print(f"   Enhanced: {stats['final_loudness']:.1f} LUFS")
                 print(f"   Gain: {stats['gain']:+.1f} dB")
-                print(f"\n📁 Output: {output_path}")
+                print(f"\n[Output] {output_path}")
                 
         except Exception as e:
-            print(f"\n❌ Error: {e}", file=sys.stderr)
+            print(f"\n[ERROR] {e}", file=sys.stderr)
             sys.exit(1)
             
     elif input_path.is_dir():
         # Batch processing
         if not args.quiet:
-            print(f"\n📂 Processing directory: {input_path}")
+            print(f"\n[Processing directory] {input_path}")
         
         results = enhancer.process_batch(
             input_path,
@@ -277,18 +277,18 @@ def main():
         # Check for failures
         failures = [r for r in results if r["status"] == "failed"]
         if failures and not args.quiet:
-            print(f"\n⚠️ {len(failures)} file(s) failed:")
+            print(f"\n[WARN] {len(failures)} file(s) failed:")
             for f in failures[:5]:
                 print(f"   - {f['file']}: {f.get('error', 'Unknown error')}")
             if len(failures) > 5:
                 print(f"   ... and {len(failures) - 5} more")
     else:
-        print(f"❌ Input not found: {input_path}", file=sys.stderr)
+        print(f"[ERROR] Input not found: {input_path}", file=sys.stderr)
         sys.exit(1)
     
     elapsed = time.time() - start_time
     if not args.quiet:
-        print(f"\n⏱️ Total time: {elapsed:.1f}s")
+        print(f"\n[Time] {elapsed:.1f}s")
 
 
 if __name__ == "__main__":

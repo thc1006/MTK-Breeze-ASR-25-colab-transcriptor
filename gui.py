@@ -27,7 +27,7 @@ class AudioEnhancerGUI:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🎙️ GPU Audio Enhancer")
+        self.root.title("GPU Audio Enhancer")
         self.root.geometry("600x700")
         self.root.resizable(True, True)
         
@@ -58,7 +58,7 @@ class AudioEnhancerGUI:
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         # ===== File Selection =====
-        file_frame = ttk.LabelFrame(main_frame, text="📁 檔案選擇", padding="5")
+        file_frame = ttk.LabelFrame(main_frame, text="檔案選擇", padding="5")
         file_frame.pack(fill=tk.X, pady=(0, 10))
         
         btn_frame = ttk.Frame(file_frame)
@@ -80,7 +80,7 @@ class AudioEnhancerGUI:
         ttk.Button(output_frame, text="選擇", command=self._select_output).pack(side=tk.RIGHT)
         
         # ===== Loudness Settings =====
-        loud_frame = ttk.LabelFrame(main_frame, text="🔊 響度設定", padding="5")
+        loud_frame = ttk.LabelFrame(main_frame, text="響度設定", padding="5")
         loud_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Label(loud_frame, text="目標響度 (LUFS):").pack(anchor=tk.W)
@@ -93,7 +93,7 @@ class AudioEnhancerGUI:
         ttk.Label(loud_slider_frame, textvariable=self.target_loudness, width=6).pack(side=tk.RIGHT)
         
         # ===== Compression Settings =====
-        comp_frame = ttk.LabelFrame(main_frame, text="🎚️ 動態壓縮", padding="5")
+        comp_frame = ttk.LabelFrame(main_frame, text="動態壓縮", padding="5")
         comp_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Checkbutton(
@@ -121,7 +121,7 @@ class AudioEnhancerGUI:
         comp_settings.columnconfigure(1, weight=1)
         
         # ===== Denoise Settings =====
-        denoise_frame = ttk.LabelFrame(main_frame, text="🔇 降噪", padding="5")
+        denoise_frame = ttk.LabelFrame(main_frame, text="降噪", padding="5")
         denoise_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Checkbutton(
@@ -139,7 +139,7 @@ class AudioEnhancerGUI:
         ttk.Label(denoise_settings, textvariable=self.denoise_strength, width=6).pack(side=tk.RIGHT)
         
         # ===== EQ Settings =====
-        eq_frame = ttk.LabelFrame(main_frame, text="📊 EQ 頻譜增強", padding="5")
+        eq_frame = ttk.LabelFrame(main_frame, text="EQ 頻譜增強", padding="5")
         eq_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Checkbutton(
@@ -174,7 +174,7 @@ class AudioEnhancerGUI:
         eq_settings.columnconfigure(1, weight=1)
         
         # ===== Output Format =====
-        format_frame = ttk.LabelFrame(main_frame, text="💾 輸出格式", padding="5")
+        format_frame = ttk.LabelFrame(main_frame, text="輸出格式", padding="5")
         format_frame.pack(fill=tk.X, pady=(0, 10))
         
         format_options = ttk.Frame(format_frame)
@@ -197,7 +197,7 @@ class AudioEnhancerGUI:
         
         # ===== Process Button =====
         self.process_btn = ttk.Button(
-            main_frame, text="🚀 開始處理",
+            main_frame, text="開始處理",
             command=self._start_processing
         )
         self.process_btn.pack(pady=10)

@@ -40,13 +40,27 @@ Thumbs.db
 # Project specific
 input/
 output/
+
+# Audio files (keep test file)
 *.wav
 *.mp3
-*.flac
 *.m4a
+*.wav
+*.flac
 *.ogg
 *.aac
+!01312.m4a
 !examples/*.wav
+
+# Transcription outputs
+*_transcript.txt
+*_transcript.srt
+*_optimized.txt
+*_optimized.srt
+*_quality.txt
+
+# Windows
+nul
 
 # Logs
 *.log
@@ -57,3 +71,4 @@ config/local.yaml
 
 # Jupyter
 .ipynb_checkpoints/
+01312.m4a

@@ -63,7 +63,7 @@ class AudioEnhancer:
             device = torch.device("cuda")
             gpu_name = torch.cuda.get_device_name(0)
             gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
-            print(f"🚀 GPU enabled: {gpu_name} ({gpu_mem:.1f} GB)")
+            print(f"[GPU] {gpu_name} ({gpu_mem:.1f} GB)")
             
             # Optimize CUDA settings
             torch.backends.cudnn.benchmark = True
@@ -72,9 +72,9 @@ class AudioEnhancer:
         else:
             device = torch.device("cpu")
             if use_gpu:
-                print("⚠️ GPU requested but not available, using CPU")
+                print("[WARN] GPU requested but not available, using CPU")
             else:
-                print("💻 Using CPU")
+                print("[CPU] Using CPU")
         
         return device
     
@@ -383,8 +383,8 @@ class AudioEnhancer:
                 
                 if show_progress:
                     tqdm.write(
-                        f"  ✅ {input_path.name}: "
-                        f"{stats['original_loudness']:.1f} → {stats['final_loudness']:.1f} LUFS "
+                        f"  [OK] {input_path.name}: "
+                        f"{stats['original_loudness']:.1f} -> {stats['final_loudness']:.1f} LUFS "
                         f"({stats['gain']:+.1f} dB)"
                     )
                     
@@ -395,14 +395,14 @@ class AudioEnhancer:
                     "error": str(e)
                 })
                 if show_progress:
-                    tqdm.write(f"  ❌ {input_path.name}: {e}")
+                    tqdm.write(f"  [FAIL] {input_path.name}: {e}")
         
         # Summary
         success = sum(1 for r in results if r["status"] == "success")
-        print(f"\n✅ Completed: {success}/{len(results)} files")
-        
+        print(f"\n[Done] {success}/{len(results)} files")
+
         if success > 0:
             avg_gain = np.mean([r["gain"] for r in results if r["status"] == "success"])
-            print(f"📈 Average gain: {avg_gain:+.1f} dB")
+            print(f"[Avg gain] {avg_gain:+.1f} dB")
         
         return results
