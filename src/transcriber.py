@@ -1,7 +1,8 @@
 """
 Breeze-ASR-25 語音轉文字轉錄器
 
-針對 RTX 3050 Laptop 4GB VRAM 深度優化版本
+使用 HuggingFace Transformers 載入官方 MediaTek-Research/Breeze-ASR-25 模型，
+搭配 Silero-VAD 做語音區段偵測，支援 bitsandbytes 量化降級。
 """
 
 import gc
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 
 
@@ -22,50 +24,44 @@ class RTX3050Config:
     """
     RTX 3050 Laptop 4GB VRAM 專屬優化配置
 
-    基於 faster-whisper + CTranslate2 的最佳實踐
-    參考: https://github.com/SYSTRAN/faster-whisper
+    使用 HuggingFace Transformers 搭配 bitsandbytes NF4 量化
     """
 
     # --- 計算精度 ---
-    # int8_float16: 權重 INT8 + 計算 FP16，VRAM ~2.9GB（最佳平衡）
-    compute_type: str = "int8_float16"
+    dtype: str = "float16"
+    quant_mode: str = "bnb_4bit"  # NF4 量化省 VRAM
 
     # --- Beam Search ---
-    # beam_size=1: 貪婪解碼，最快但略降品質
-    # beam_size=3: 平衡速度與品質（推薦）
-    # beam_size=5: 預設，最佳品質但較慢
     beam_size: int = 1  # 4GB VRAM 建議用 1，速度優先
 
     # --- VAD 語音活動偵測 ---
-    # 過濾靜音段落，大幅提升速度
     vad_filter: bool = True
-    vad_threshold: float = 0.5           # 語音偵測閾值 (0-1)
-    vad_min_speech_ms: int = 250         # 最短語音段落 (ms)
-    vad_min_silence_ms: int = 100        # 觸發分段的最短靜音 (ms)
-    vad_speech_pad_ms: int = 30          # 語音前後填充 (ms)
-    vad_max_speech_duration: float = 30  # 單段最長秒數（避免 OOM）
+    vad_threshold: float = 0.5
+    vad_min_speech_ms: int = 250
+    vad_min_silence_ms: int = 100
+    vad_speech_pad_ms: int = 30
+    vad_max_speech_duration: float = 30
 
-    # --- 記憶體管理 ---
-    # 長音檔分段處理，避免 VRAM 爆掉
-    chunk_length: int = 30       # 每次處理秒數
-    cpu_threads: int = 4         # CPU 執行緒數
-    num_workers: int = 1         # GPU worker 數（4GB 只用 1 個）
+    # --- Pipeline 分段 ---
+    chunk_length_s: int = 30  # pipeline 每次處理的秒數
 
     # --- 速度優化 ---
     condition_on_previous_text: bool = False  # 關閉上下文條件，加速
-    compression_ratio_threshold: float = 2.4  # 壓縮比閾值
-    log_prob_threshold: float = -1.0          # log 機率閾值
-    no_speech_threshold: float = 0.6          # 無語音閾值
+    compression_ratio_threshold: float = 2.4
+    log_prob_threshold: float = -1.0
+    no_speech_threshold: float = 0.6
 
     # --- 輸出控制 ---
-    word_timestamps: bool = False  # 詞級時間戳（開啟會變慢）
-    without_timestamps: bool = False  # 完全不要時間戳
+    word_timestamps: bool = False
+    without_timestamps: bool = False
 
 
 @dataclass
 class QualityConfig:
     """品質優先配置（較慢但更準確）"""
-    compute_type: str = "int8_float16"
+    dtype: str = "float16"
+    quant_mode: str = "none"
+
     beam_size: int = 3
     vad_filter: bool = True
     vad_threshold: float = 0.4
@@ -73,9 +69,7 @@ class QualityConfig:
     vad_min_silence_ms: int = 150
     vad_speech_pad_ms: int = 50
     vad_max_speech_duration: float = 30
-    chunk_length: int = 30
-    cpu_threads: int = 4
-    num_workers: int = 1
+    chunk_length_s: int = 30
     condition_on_previous_text: bool = True  # 開啟提升準確度
     compression_ratio_threshold: float = 2.4
     log_prob_threshold: float = -1.0
@@ -94,7 +88,8 @@ class GPUConfig:
     """
 
     # --- 計算精度 ---
-    compute_type: str = "int8_float16"
+    dtype: str = "float16"
+    quant_mode: str = "none"  # "none" / "bnb_4bit" / "bnb_8bit"
 
     # --- Beam Search ---
     beam_size: int = 1
@@ -107,10 +102,8 @@ class GPUConfig:
     vad_speech_pad_ms: int = 30
     vad_max_speech_duration: float = 30
 
-    # --- 記憶體管理 ---
-    chunk_length: int = 30
-    cpu_threads: int = 4
-    num_workers: int = 1
+    # --- Pipeline 分段 ---
+    chunk_length_s: int = 30  # 0 = 不分段（高 VRAM），30 = 分段處理（低 VRAM）
 
     # --- 速度優化 ---
     condition_on_previous_text: bool = False
@@ -122,9 +115,6 @@ class GPUConfig:
     word_timestamps: bool = False
     without_timestamps: bool = False
 
-    # --- 批次推論 ---
-    batch_size: int = 0  # 0 = 不使用批次，>0 = BatchedInferencePipeline
-
     # --- GPU 偵測資訊（唯讀紀錄） ---
     gpu_name: str = ""
     vram_mb: int = 0
@@ -134,21 +124,21 @@ class GPUConfig:
 
 # ============================================================================
 # VRAM 分級表
-# 各層對應 (tier_name, vram_upper_mb, compute_type, beam, batch, cond_prev, workers)
+# 各層對應 (tier_name, vram_upper_mb, dtype, quant_mode, beam, cond_prev, chunk_s)
 # ============================================================================
 
 _VRAM_TIERS = [
-    # tier_name,  vram_upper,  compute_type,     beam, batch, cond_prev, workers
-    ("low",       4096,        "int8_float16",   1,    0,     False,     1),
-    ("mid_low",   6144,        "int8_float16",   3,    0,     False,     1),
-    ("mid",       8192,        "int8_float16",   5,    0,     True,      1),
-    ("mid_high",  11264,       "float16",        5,    0,     True,      1),
-    ("high",      24576,       "float16",        5,    12,    True,      2),
-    ("very_high", 49152,       "float16",        5,    24,    True,      4),
+    # tier_name,  vram_upper,  dtype,      quant_mode,  beam, cond_prev, chunk_s
+    ("low",       4096,        "float16",  "bnb_4bit",  1,    False,     30),
+    ("mid_low",   6144,        "float16",  "bnb_8bit",  2,    False,     30),
+    ("mid",       8192,        "float16",  "none",      3,    True,      30),
+    ("mid_high",  11264,       "float16",  "none",      5,    True,      0),
+    ("high",      24576,       "float16",  "none",      5,    True,      0),
+    ("very_high", 49152,       "float16",  "none",      5,    True,      0),
 ]
 
 # 超過 49152 MB 的 GPU 用這組
-_ULTRA_TIER = ("ultra", 0, "float16", 5, 32, True, 4)
+_ULTRA_TIER = ("ultra", 0, "float16", "none", 5, True, 0)
 
 
 # ============================================================================
