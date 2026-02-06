@@ -139,6 +139,61 @@ class AudioEnhancer:
             n_jobs=-1  # Use all CPU cores
         )
     
+    def _gpu_denoise(self, audio_tensor: torch.Tensor, sr: int) -> torch.Tensor:
+        """GPU 頻譜閘門降噪
+
+        用 torch.stft 做頻譜分析，取前 0.5 秒估算噪音底噪，
+        對低於底噪 * threshold 的頻率分量做衰減。
+        比 noisereduce (CPU) 快很多。
+
+        Args:
+            audio_tensor: 1-D float tensor，已在 self.device 上
+            sr: 取樣率
+
+        Returns:
+            降噪後的 tensor，同裝置
+        """
+        if not self.config.enable_denoise:
+            return audio_tensor
+
+        n_fft = 2048
+        hop_length = 512
+        # 用 Hann window 做 STFT
+        window = torch.hann_window(n_fft, device=audio_tensor.device)
+
+        # STFT -> 複數頻譜
+        stft = torch.stft(
+            audio_tensor, n_fft=n_fft, hop_length=hop_length,
+            window=window, return_complex=True,
+        )
+        magnitude = torch.abs(stft)
+
+        # 取前 0.5 秒的 frame 來估算噪音頻譜
+        noise_frames = max(1, int(0.5 * sr / hop_length))
+        noise_frames = min(noise_frames, magnitude.shape[-1])
+        noise_profile = magnitude[:, :noise_frames].mean(dim=-1, keepdim=True)
+
+        # 頻譜閘門：低於噪音底噪的部分做衰減
+        # denoise_strength 控制衰減程度（0=不衰減, 1=完全消除）
+        strength = self.config.denoise_strength
+        threshold_mult = 1.5  # 底噪的倍數作為門檻
+        gate = torch.clamp(
+            (magnitude - noise_profile * threshold_mult)
+            / (magnitude + 1e-10),
+            min=1.0 - strength,
+            max=1.0,
+        )
+
+        # 套用 gate 到複數頻譜
+        filtered = stft * gate
+
+        # ISTFT 重建波形
+        result = torch.istft(
+            filtered, n_fft=n_fft, hop_length=hop_length,
+            window=window, length=len(audio_tensor),
+        )
+        return result
+
     def _compress_tensor(self, audio_tensor: torch.Tensor, sr: int) -> torch.Tensor:
         """在 GPU tensor 上執行動態範圍壓縮（不搬移裝置）
 
@@ -228,28 +283,40 @@ class AudioEnhancer:
 
         return audio_tensor
 
-    def _gpu_pipeline(self, audio: np.ndarray, sr: int) -> np.ndarray:
-        """在 GPU 上連續執行 compress + EQ，只搬移一次
+    def _gpu_pipeline(
+        self, audio: np.ndarray, sr: int, include_denoise: bool = False,
+    ) -> np.ndarray:
+        """在 GPU 上連續執行 denoise + compress + EQ，只搬移一次
 
-        原本 compress() 和 apply_eq() 各自做 numpy->GPU->numpy（共 4 次 transfer）。
-        合併成 1 次搬進 + 1 次搬出 = 2 次 transfer。
+        整合所有 GPU 可加速的步驟到單一 pass：
+        - denoise: 用 torch.stft 頻譜閘門（取代 noisereduce CPU 瓶頸）
+        - compress: 動態範圍壓縮
+        - EQ: 頻段增強
+
+        資料只搬進搬出 GPU 各一次（2 次 transfer）。
 
         Args:
             audio: numpy array
             sr: 取樣率
+            include_denoise: 是否在 GPU pipeline 內執行降噪
+                True = 用 GPU STFT 降噪（快，但效果與 noisereduce 略有不同）
+                False = 不在此做降噪（由呼叫端自行用 denoise() 處理）
 
         Returns:
             處理後的 numpy array
         """
+        need_denoise = include_denoise and self.config.enable_denoise
         need_compress = self.config.enable_compression
         need_eq = self.config.enable_eq
 
-        if not need_compress and not need_eq:
+        if not need_denoise and not need_compress and not need_eq:
             return audio
 
         # 搬進 GPU（1 次 transfer）
         audio_tensor = torch.from_numpy(audio).float().to(self.device)
 
+        if need_denoise:
+            audio_tensor = self._gpu_denoise(audio_tensor, sr)
         if need_compress:
             audio_tensor = self._compress_tensor(audio_tensor, sr)
         if need_eq:
@@ -361,9 +428,15 @@ class AudioEnhancer:
         meter = self._get_meter(sr)
         original_loudness = meter.integrated_loudness(audio)
 
-        # 增強流程：denoise (CPU) -> compress + EQ (GPU pipeline)
-        audio = self.denoise(audio, sr)
-        audio = self._gpu_pipeline(audio, sr)
+        # GPU 可用時：denoise + compress + EQ 全在 GPU 上做（單一 pass）
+        # GPU 不可用時：denoise 走 noisereduce (CPU)，compress + EQ 走 CPU tensor
+        use_gpu_denoise = (self.device.type == "cuda")
+
+        if use_gpu_denoise:
+            audio = self._gpu_pipeline(audio, sr, include_denoise=True)
+        else:
+            audio = self.denoise(audio, sr)
+            audio = self._gpu_pipeline(audio, sr, include_denoise=False)
 
         # 響度標準化（用對應取樣率的 meter）
         current_loudness = meter.integrated_loudness(audio)
