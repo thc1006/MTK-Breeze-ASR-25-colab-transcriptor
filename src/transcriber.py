@@ -463,24 +463,31 @@ class BreezeTranscriber:
         """
         載入音檔並轉換為 16kHz mono numpy array
 
+        優先用 torchaudio，若格式不支援（如 m4a）則用 librosa。
+
         Returns:
             (audio_array, sample_rate) -- sample_rate 固定 16000
         """
-        import torchaudio
+        # 先嘗試 torchaudio（wav/flac 等格式較快）
+        try:
+            import torchaudio
+            waveform, sr = torchaudio.load(str(audio_path))
 
-        waveform, sr = torchaudio.load(str(audio_path))
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+            if sr != 16000:
+                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
+                waveform = resampler(waveform)
 
-        # 轉 mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
+            audio_np = waveform.squeeze(0).numpy()
+            return audio_np, 16000
 
-        # 重採樣到 16kHz
-        if sr != 16000:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)
-            waveform = resampler(waveform)
+        except Exception:
+            pass
 
-        # 轉 numpy，去掉 channel 維度
-        audio_np = waveform.squeeze(0).numpy()
+        # torchaudio 失敗就用 librosa（支援 m4a 等格式）
+        import librosa
+        audio_np, sr = librosa.load(str(audio_path), sr=16000, mono=True)
         return audio_np, 16000
 
     # ------------------------------------------------------------------
@@ -579,6 +586,7 @@ class BreezeTranscriber:
             "logprob_threshold": self.config.log_prob_threshold,
             "no_speech_threshold": self.config.no_speech_threshold,
             "condition_on_prev_tokens": self.config.condition_on_previous_text,
+            "temperature": 0.0,  # greedy decoding (beam search 時必須為 0)
         }
 
         # initial_prompt 透過 prompt_ids 傳入
